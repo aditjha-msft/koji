@@ -1273,7 +1273,29 @@ class BuildTask(BaseTaskHandler):
         # let the system know about the build we're attempting
         if not self.opts.get('scratch'):
             # scratch builds do not get imported
-            build_id = self.session.host.initBuild(data)
+            try:
+                build_id = self.session.host.initBuild(data)
+            except koji.GenericError as error:
+                # A replayed task (e.g. after a builder restart) may find its
+                # own build already COMPLETE. Finish tagging instead of failing;
+                # collisions with any other task or source still raise.
+                msg = str(error)
+                if not msg.startswith('Build already exists ('):
+                    raise
+                completed = self.session.getBuild(data)
+                if not (completed
+                        and completed['state'] == koji.BUILD_STATES['COMPLETE']
+                        and completed.get('task_id') == self.id
+                        and data.get('source')
+                        and completed.get('source') == data['source']
+                        and msg.startswith('Build already exists (id=%s, state=COMPLETE):'
+                                           % completed['id'])):
+                    raise
+                self.logger.warning("Resuming completed build %s for replayed task %s",
+                                    completed['id'], self.id)
+                if not self.opts.get('skip_tag'):
+                    self.tagBuild(completed['id'], dest_tag)
+                return
         # (initBuild raises an exception if there is a conflict)
         failany = (self.opts.get('fail_fast', False) or
                    not getattr(self.options, 'build_arch_can_fail', False))
